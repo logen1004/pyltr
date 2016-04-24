@@ -6,10 +6,6 @@ metrics, data wrangling helpers, and more.
 
 This software is licensed under the BSD 3-clause license (see ``LICENSE.txt``).
 
-The author may be contacted at ``ma127jerry <@t> gmail`` with general
-feedback, questions, or bug reports.
-
-
 Example
 =======
 
