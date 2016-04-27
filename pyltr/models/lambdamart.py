@@ -36,7 +36,9 @@ class LambdaMART(AdditiveModel):
     ----------
 
     metric : object
-        The metric to be maximized by the model.
+        The metric to be maximized by the model.  May also be a list
+        of ordered pairs (coef, metric_object) representing a weighted
+        sum.
     learning_rate : float, optional (default=0.1)
         Shrinks the contribution of each tree by `learning_rate`.
         There is a trade-off between learning_rate and n_estimators.
@@ -123,7 +125,17 @@ class LambdaMART(AdditiveModel):
                  max_features=None, verbose=0, max_leaf_nodes=None,
                  warm_start=True):
         super(LambdaMART, self).__init__()
-        self.metric = metrics.dcg.NDCG() if metric is None else metric
+        if metric is None:
+            self.metrics = [metrics.dcg.NDCG()]
+            self.metric_coefs = [1.0]
+        elif isinstance(metric, list):
+            assert all(isinstance(m, tuple) for m in metric)
+            self.metrics = [m for _, m in metric]
+            self.metric_coefs = [c for c, _ in metric]
+        else:
+            self.metrics = [metric]
+            self.metric_coefs = [1.0]
+        self.n_metrics = len(self.metrics)
         self.learning_rate = learning_rate
         self.n_estimators = n_estimators
         self.query_subsample = query_subsample
@@ -193,7 +205,7 @@ class LambdaMART(AdditiveModel):
             self.estimators_.resize((self.n_estimators, 1))
             self.train_score_.resize(self.n_estimators)
             if self.query_subsample < 1.0:
-                self.oob_improvement_.resize(self.n_estimators)
+                self.oob_improvement_.resize((self.n_estimators, self.n_metrics))
             y_pred = self.predict(X)
 
         n_stages = self._fit_stages(X, y, qids, y_pred,
@@ -288,10 +300,11 @@ class LambdaMART(AdditiveModel):
         all_lambdas = np.zeros(n_samples)
         all_deltas = np.zeros(n_samples)
         for qid, a, b, _ in query_groups:
-            lambdas, deltas = self.metric.calc_lambdas_deltas(
-                qid, y[a:b], y_pred[a:b])
-            all_lambdas[a:b] = lambdas
-            all_deltas[a:b] = deltas
+            for coef, metric in zip(self.metric_coefs, self.metrics):
+                lambdas, deltas = metric.calc_lambdas_deltas(
+                    qid, y[a:b], y_pred[a:b])
+                all_lambdas[a:b] += coef * lambdas
+                all_deltas[a:b] += coef * deltas
 
         tree = sklearn.tree.DecisionTreeRegressor(
             criterion='friedman_mse',
@@ -336,7 +349,8 @@ class LambdaMART(AdditiveModel):
 
         if self.verbose:
             verbose_reporter = _VerboseReporter(self.verbose)
-            verbose_reporter.init(self, begin_at_stage)
+            verbose_reporter.init(self, begin_at_stage, self.n_metrics,
+                                  monitor is not None)
 
         for i in range(begin_at_stage, self.n_estimators):
             if do_query_oob:
@@ -356,41 +370,43 @@ class LambdaMART(AdditiveModel):
                 sample_mask[sidx_to_use] = 1
 
             if do_query_oob:
-                old_oob_total_score = 0.0
-                if self.metric.is_ltr_metric:
-                    for qid, a, b, _ in query_groups[~query_mask]:
-                        old_oob_total_score += self.metric.evaluate_preds(
-                            qid, y[a:b], y_pred[a:b])
-                else:
-                    old_oob_total_score = self.metric.evaluate_preds(
-                            None, y[~sample_mask], y_pred[~sample_mask])
+                old_oob_total_score = np.zeros(self.n_metrics)
+                for midx, metric in enumerate(self.metrics):
+                    if metric.is_ltr_metric:
+                        for qid, a, b, _ in query_groups[~query_mask]:
+                            old_oob_total_score[midx] += metric.evaluate_preds(
+                                qid, y[a:b], y_pred[a:b])
+                    else:
+                        old_oob_total_score[midx] = metric.evaluate_preds(
+                                None, y[~sample_mask], y_pred[~sample_mask])
 
             y_pred = self._fit_stage(i, X, y, qids, y_pred, sample_weight,
                                      sample_mask, query_groups_to_use,
                                      random_state)
 
-            train_total_score, oob_total_score = 0.0, 0.0
-            if self.metric.is_ltr_metric:
-                for qidx, (qid, a, b, _) in enumerate(query_groups):
-                    score = self.metric.evaluate_preds(
-                        qid, y[a:b], y_pred[a:b])
-                    if query_mask[qidx]:
-                        train_total_score += score
-                    else:
-                        oob_total_score += score
-            else:
-                train_total_score = self.metric.evaluate_preds(
-                    None, y[sample_mask], y_pred[sample_mask])
-                oob_total_score = self.metric.evaluate_preds(
-                    None, y[~sample_mask], y_pred[~sample_mask])
+            for midx, metric in enumerate(self.metrics):
+                train_total_score, oob_total_score = 0.0, 0.0
+                if metric.is_ltr_metric:
+                    for qidx, (qid, a, b, _) in enumerate(query_groups):
+                        score = metric.evaluate_preds(
+                            qid, y[a:b], y_pred[a:b])
+                        if query_mask[qidx]:
+                            train_total_score += score
+                        else:
+                            oob_total_score += score
+                else:
+                    train_total_score = metric.evaluate_preds(
+                        None, y[sample_mask], y_pred[sample_mask])
+                    oob_total_score = metric.evaluate_preds(
+                        None, y[~sample_mask], y_pred[~sample_mask])
 
-            train_normalizer = q_inbag if self.metric.is_ltr_metric else 1.0
-            oob_normalizer = n_queries - q_inbag if self.metric.is_ltr_metric else 1.0
-            self.train_score_[i] = train_total_score / train_normalizer
-            if do_query_oob:
-                if q_inbag < n_queries:
-                    self.oob_improvement_[i] = \
-                        (oob_total_score - old_oob_total_score) / oob_normalizer
+                train_normalizer = q_inbag if metric.is_ltr_metric else 1.0
+                oob_normalizer = n_queries - q_inbag if metric.is_ltr_metric else 1.0
+                self.train_score_[i, midx] = train_total_score / train_normalizer
+                if do_query_oob:
+                    if q_inbag < n_queries:
+                        self.oob_improvement_[i, midx] = \
+                            (oob_total_score - old_oob_total_score[midx]) / oob_normalizer
 
             early_stop = False
             monitor_output = None
@@ -413,9 +429,9 @@ class LambdaMART(AdditiveModel):
     def _init_state(self):
         self.estimators_ = np.empty((self.n_estimators, 1), dtype=np.object)
         self.estimators_fitted_ = 0
-        self.train_score_ = np.zeros(self.n_estimators, dtype=np.float64)
+        self.train_score_ = np.zeros((self.n_estimators, self.n_metrics), dtype=np.float64)
         if self.query_subsample < 1.0:
-            self.oob_improvement_ = np.zeros((self.n_estimators,),
+            self.oob_improvement_ = np.zeros((self.n_estimators, self.n_metrics),
                                              dtype=np.float64)
 
     def _clear_state(self):
@@ -480,22 +496,31 @@ class _VerboseReporter(object):
     def __init__(self, verbose):
         self.verbose = verbose
 
-    def init(self, est, begin_at_stage=0):
+    def _pretty_print_score(self, score):
+        if score.size == 1:
+            return '%12.4f' % score
+        return ''.join('%8.4f' % score[i] for i in range(score.size))
+
+    def init(self, est, begin_at_stage=0, n_metrics=1, has_monitor=False):
         # header fields and line format str
         header_fields = ['Iter', 'Train score']
-        verbose_fmt = ['{iter:>5d}', '{train_score:>12.4f}']
+        verbose_fmt = ['{iter:>5d}', '{train_score}']
+        header_fmt = ['%5s', ('%' + str(max(12, 8 * n_metrics)) + 's')]
         # do oob?
         if est.query_subsample < 1:
             header_fields.append('OOB Improve')
-            verbose_fmt.append('{oob_impr:>12.4f}')
+            verbose_fmt.append('{oob_impr}')
+            header_fmt.append('%' + str(max(12, 8 * n_metrics)) + 's')
         header_fields.append('Remaining')
         verbose_fmt.append('{remaining_time:>12s}')
-        header_fields.append('Monitor Output')
-        verbose_fmt.append('{monitor_output:>40s}')
+        header_fmt.append('%12s')
+        if has_monitor:
+            header_fields.append('Monitor Output')
+            verbose_fmt.append('{monitor_output:>40s}')
+            header_fmt.append('%40s')
 
         # print the header line
-        print(('%5s ' + '%12s ' *
-               (len(header_fields) - 2) + '%40s ') % tuple(header_fields))
+        print(' '.join(header_fmt) % tuple(header_fields))
 
         self.verbose_fmt = ' '.join(verbose_fmt)
         # plot verbose info each time i % verbose_mod == 0
@@ -521,11 +546,12 @@ class _VerboseReporter(object):
                 remaining_time = '{0:.2f}s'.format(remaining_time)
             if monitor_output is None:
                 monitor_output = ''
-            print(self.verbose_fmt.format(iter=j + 1,
-                                          train_score=est.train_score_[j],
-                                          oob_impr=oob_impr,
-                                          remaining_time=remaining_time,
-                                          monitor_output=monitor_output))
+            print(self.verbose_fmt.format(
+                iter=j + 1,
+                train_score=self._pretty_print_score(est.train_score_[j]),
+                oob_impr=self._pretty_print_score(oob_impr),
+                remaining_time=remaining_time,
+                monitor_output=monitor_output))
             if i + 1 >= 10:
                 self.verbose_mod = 5
             if i + 1 >= 50:
