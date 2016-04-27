@@ -1,7 +1,8 @@
 import numpy as np
+import scipy
 from sklearn.externals.six.moves import range
 from ..util.group import check_qids, get_groups
-from ..util.sort import get_sorted_y
+from ..util.sort import get_sorted_y, get_sorted_y_positions
 
 
 class Metric(object):
@@ -68,6 +69,70 @@ class Metric(object):
                 targets[j] = tmp
 
         return deltas
+
+    def calc_lambdas_deltas(self, qid, targets, preds):
+        """Returns the first and second (psuedo-)derivatives.
+
+        Lambdas is the negative gradient of the loss with respect
+        to the prediction.  Deltas is the derivative of that.
+
+        Parameters
+        ----------
+        qid : object
+            See `evaluate`.
+        targets : array_like of shape = [n_targets]
+            See `evaluate`.
+        preds : array_like of shape = [n_targets]
+            List of predicted scores corresponding to the targets.
+
+        Returns
+        -------
+        lambdas = array_like of shape = [n_targets]
+        deltas = array_like of shape = [n_targets]
+
+        """
+        ns = targets.shape[0]
+        positions = get_sorted_y_positions(targets, preds, check=False)
+        actual = targets[positions]
+
+        swap_deltas = self.calc_swap_deltas(qid, actual)
+        max_k = self.max_k()
+        if max_k is None or ns < max_k:
+            max_k = ns
+
+        lambdas = np.zeros(ns)
+        deltas = np.zeros(ns)
+
+        for i in range(max_k):
+            for j in range(i + 1, ns):
+                if actual[i] == actual[j]:
+                    continue
+
+                delta_metric = swap_deltas[i, j]
+                if delta_metric == 0.0:
+                    continue
+
+                a, b = positions[i], positions[j]
+                # invariant: preds[a] >= preds[b]
+
+                if actual[i] < actual[j]:
+                    assert delta_metric > 0.0
+                    logistic = scipy.special.expit(preds[a] - preds[b])
+                    l = logistic * delta_metric
+                    lambdas[a] -= l
+                    lambdas[b] += l
+                else:
+                    assert delta_metric < 0.0
+                    logistic = scipy.special.expit(preds[b] - preds[a])
+                    l = logistic * -delta_metric
+                    lambdas[a] += l
+                    lambdas[b] -= l
+
+                hess = (1 - logistic) * l
+                deltas[a] += hess
+                deltas[b] += hess
+
+        return lambdas, deltas
 
     def max_k(self):
         """Returns a cutoff value for the metric.

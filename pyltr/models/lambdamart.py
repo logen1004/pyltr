@@ -16,7 +16,6 @@ containing query ids for all the samples.
 
 import numbers
 import numpy as np
-import scipy
 import sklearn.ensemble
 import sklearn.externals
 import sklearn.utils
@@ -264,50 +263,6 @@ class LambdaMART(AdditiveModel):
         importances = total_sum / len(self.estimators_)
         return importances
 
-    def _calc_lambdas_deltas(self, qid, y, y_pred):
-        ns = y.shape[0]
-        positions = get_sorted_y_positions(y, y_pred, check=False)
-        actual = y[positions]
-
-        swap_deltas = self.metric.calc_swap_deltas(qid, actual)
-        max_k = self.metric.max_k()
-        if max_k is None or ns < max_k:
-            max_k = ns
-
-        lambdas = np.zeros(ns)
-        deltas = np.zeros(ns)
-
-        for i in range(max_k):
-            for j in range(i + 1, ns):
-                if actual[i] == actual[j]:
-                    continue
-
-                delta_metric = swap_deltas[i, j]
-                if delta_metric == 0.0:
-                    continue
-
-                a, b = positions[i], positions[j]
-                # invariant: y_pred[a] >= y_pred[b]
-
-                if actual[i] < actual[j]:
-                    assert delta_metric > 0.0
-                    logistic = scipy.special.expit(y_pred[a] - y_pred[b])
-                    l = logistic * delta_metric
-                    lambdas[a] -= l
-                    lambdas[b] += l
-                else:
-                    assert delta_metric < 0.0
-                    logistic = scipy.special.expit(y_pred[b] - y_pred[a])
-                    l = logistic * -delta_metric
-                    lambdas[a] += l
-                    lambdas[b] -= l
-
-                gradient = (1 - logistic) * l
-                deltas[a] += gradient
-                deltas[b] += gradient
-
-        return lambdas, deltas
-
     def _update_terminal_regions(self, tree, X, y, lambdas, deltas, y_pred,
                                  sample_mask):
         terminal_regions = tree.apply(X)
@@ -333,8 +288,8 @@ class LambdaMART(AdditiveModel):
         all_lambdas = np.zeros(n_samples)
         all_deltas = np.zeros(n_samples)
         for qid, a, b, _ in query_groups:
-            lambdas, deltas = self._calc_lambdas_deltas(qid, y[a:b],
-                                                        y_pred[a:b])
+            lambdas, deltas = self.metric.calc_lambdas_deltas(
+                qid, y[a:b], y_pred[a:b])
             all_lambdas[a:b] = lambdas
             all_deltas[a:b] = deltas
 
