@@ -6,14 +6,18 @@ from ..util.sort import get_sorted_y, get_sorted_y_positions
 
 
 class Metric(object):
-    """Base LTR metric class.
+    """Base metric class.
 
     Subclasses must override evaluate() and can optionally override various
     other methods.
 
     """
+    is_ltr_metric = True  # is this metric query-based or sample-based?
+
     def evaluate(self, qid, targets):
         """Evaluates the metric on a ranked list of targets.
+
+        Not implemented for non-LTR metrics.
 
         Parameters
         ----------
@@ -152,7 +156,7 @@ class Metric(object):
         Parameters
         ----------
         qid : object
-            See `evaluate`.
+            See `evaluate`.  Must be None for non-LTR metric.
         targets : array_like of shape = [n_targets]
             See `evaluate`.
         preds : array_like of shape = [n_targets]
@@ -173,6 +177,7 @@ class Metric(object):
         """Calculates the expectied value of the metric on randomized targets.
 
         This implementation just averages the metric over 100 shuffles.
+        Not implemented for non-LTR metrics.
 
         Parameters
         ----------
@@ -220,6 +225,9 @@ class Metric(object):
 
     def calc_mean_random(self, qids, targets):
         """Calculates the EV of the mean of the metric with random ranking.
+
+        For non-LTR metrics, this just calculates the metric on the best
+        constant predictor.
 
         Parameters
         ----------

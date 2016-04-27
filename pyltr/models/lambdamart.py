@@ -357,29 +357,40 @@ class LambdaMART(AdditiveModel):
 
             if do_query_oob:
                 old_oob_total_score = 0.0
-                for qid, a, b, _ in query_groups[~query_mask]:
-                    old_oob_total_score += self.metric.evaluate_preds(
-                        qid, y[a:b], y_pred[a:b])
+                if self.metric.is_ltr_metric:
+                    for qid, a, b, _ in query_groups[~query_mask]:
+                        old_oob_total_score += self.metric.evaluate_preds(
+                            qid, y[a:b], y_pred[a:b])
+                else:
+                    old_oob_total_score = self.metric.evaluate_preds(
+                            None, y[~sample_mask], y_pred[~sample_mask])
 
             y_pred = self._fit_stage(i, X, y, qids, y_pred, sample_weight,
                                      sample_mask, query_groups_to_use,
                                      random_state)
 
             train_total_score, oob_total_score = 0.0, 0.0
-            for qidx, (qid, a, b, _) in enumerate(query_groups):
-                score = self.metric.evaluate_preds(
-                    qid, y[a:b], y_pred[a:b])
-                if query_mask[qidx]:
-                    train_total_score += score
-                else:
-                    oob_total_score += score
+            if self.metric.is_ltr_metric:
+                for qidx, (qid, a, b, _) in enumerate(query_groups):
+                    score = self.metric.evaluate_preds(
+                        qid, y[a:b], y_pred[a:b])
+                    if query_mask[qidx]:
+                        train_total_score += score
+                    else:
+                        oob_total_score += score
+            else:
+                train_total_score = self.metric.evaluate_preds(
+                    None, y[sample_mask], y_pred[sample_mask])
+                oob_total_score = self.metric.evaluate_preds(
+                    None, y[~sample_mask], y_pred[~sample_mask])
 
-            self.train_score_[i] = train_total_score / q_inbag
+            train_normalizer = q_inbag if self.metric.is_ltr_metric else 1.0
+            oob_normalizer = n_queries - q_inbag if self.metric.is_ltr_metric else 1.0
+            self.train_score_[i] = train_total_score / train_normalizer
             if do_query_oob:
                 if q_inbag < n_queries:
                     self.oob_improvement_[i] = \
-                        ((oob_total_score - old_oob_total_score) /
-                         (n_queries - q_inbag))
+                        (oob_total_score - old_oob_total_score) / oob_normalizer
 
             early_stop = False
             monitor_output = None

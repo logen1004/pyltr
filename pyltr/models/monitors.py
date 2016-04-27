@@ -57,11 +57,14 @@ class ValidationMonitor(object):
         else:
             y_pred = model.predict(self.X)
 
-        score = 0.0
-        for qid, a, b in self._query_groups:
-            sorted_y = get_sorted_y(self.y[a:b], y_pred[a:b])
-            score += self.metric.evaluate(qid, sorted_y)
-        score /= len(self._query_groups)
+        if self.metric.is_ltr_metric:
+            score = 0.0
+            for qid, a, b in self._query_groups:
+                sorted_y = get_sorted_y(self.y[a:b], y_pred[a:b])
+                score += self.metric.evaluate(qid, sorted_y)
+            score /= len(self._query_groups)
+        else:
+            score = self.metric.evaluate_preds(None, self.y, y_pred)
 
         if self._best_score is None or score > self._best_score:
             self._best_score = score
